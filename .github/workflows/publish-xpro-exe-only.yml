@@ -1,0 +1,45 @@
+name: Publish XPRO V2 Prebuilt EXE (No App Source)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Draft release version such as 2.0.0 or 2.0.1"
+        required: true
+        type: string
+      notes:
+        description: "Release notes"
+        required: false
+        default: "Stability improvements"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xpro-v2-exe-only-publisher
+  cancel-in-progress: false
+
+jobs:
+  sign-and-publish:
+    if: github.repository == 'gsmxr/XPRO-USB-V2-Updates' && github.ref == 'refs/heads/main' && github.actor == 'gsmxr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out publisher-only files (not XPRO app source)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install signer dependency
+        run: python -m pip install 'cryptography>=43,<48'
+      - name: Verify draft, sign EXE manifest, publish release
+        env:
+          XPRO_SIGNING_KEY_B64: ${{ secrets.XPRO_SIGNING_KEY_B64 }}
+          GH_TOKEN: ${{ github.token }}
+          XPRO_VERSION: ${{ inputs.version }}
+          XPRO_NOTES: ${{ inputs.notes }}
+        run: python publisher/sign_draft.py
