@@ -13,11 +13,11 @@ import subprocess
 import sys
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from pe_checks import inspect_exe
 
 REPO = "gsmxr/XPRO-USB-V2-Updates"
 EXPECTED_PUBLIC_FINGERPRINT = "584ce69f5f6d322e"
 VERSION_PATTERN = re.compile(r"^2\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
-MAX_EXE_BYTES = 600 * 1024 * 1024
 
 
 def canonical_bytes(payload):
@@ -48,16 +48,9 @@ def load_trusted_signer(encoded):
 def build_manifest(signer, exe_path, version, notes):
     validate_version(version)
     path = Path(exe_path)
-    size = path.stat().st_size
-    if size < 10000 or size > MAX_EXE_BYTES:
-        raise ValueError("Unexpected EXE size")
-    with path.open("rb") as stream:
-        if stream.read(2) != b"MZ":
-            raise ValueError("File does not start with a Windows PE MZ header")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
+    info = inspect_exe(path)
+    size = info['size']
+    print(f'[OK] Downloaded EXE: {path.name}; size={size:,} bytes, sha256={info["sha256"]}', flush=True)
     expected_name = f"XPRO_USB_{version}.exe"
     if path.name != expected_name:
         raise ValueError(f"Incorrect EXE asset filename; expected {expected_name}")
@@ -65,7 +58,7 @@ def build_manifest(signer, exe_path, version, notes):
         "product": "xpro-usb",
         "version": version,
         "url": f"https://github.com/{REPO}/releases/download/v{version}/{expected_name}",
-        "sha256": digest.hexdigest(),
+        "sha256": info["sha256"],
         "size": size,
         "notes": str(notes)[:300],
     }
@@ -114,9 +107,25 @@ def main():
     signer = load_trusted_signer(os.environ.get("XPRO_SIGNING_KEY_B64", ""))
     dest = Path(os.environ.get("RUNNER_TEMP", ".")) / "xpro_release"
     dest.mkdir(parents=True, exist_ok=True)
+    advertised = release['assets'][0].get('size')
+    print(f'[INFO] Draft asset {expected_name}: GitHub-reported size={advertised!r} bytes', flush=True)
+    if isinstance(advertised, int) and advertised < 10000:
+        raise ValueError(
+            f'Draft EXE asset is only {advertised:,} bytes, so it is NOT a complete app. '
+            'Re-upload the actual Windows dist EXE using UPLOAD_OR_REPAIR_DRAFT.bat, then rerun workflow.'
+        )
     gh("release", "download", tag, "--repo", REPO,
        "--pattern", expected_name, "--dir", str(dest))
     exe = dest / expected_name
+    if isinstance(advertised, int) and exe.stat().st_size != advertised:
+        raise ValueError(f'Download size mismatch: GitHub reports {advertised:,} bytes, downloaded {exe.stat().st_size:,}; do not publish.')
+    try:
+        inspect_exe(exe)
+    except ValueError as exc:
+        raise ValueError(
+            f'{exc}. Fix by running UPLOAD_OR_REPAIR_DRAFT.bat on your PC '
+            'and selecting the actual tested dist EXE, then rerun this workflow.'
+        ) from exc
     manifest = build_manifest(signer, exe, version, os.environ.get("XPRO_NOTES", "Stability improvements"))
     manifest_path = dest / "latest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
